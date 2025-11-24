@@ -1,135 +1,67 @@
-![Build](https://github.com/kubev2v/forklift/workflows/Build%20and%20push%20images/badge.svg)&nbsp;![CI](https://github.com/kubev2v/forklift/workflows/CI/badge.svg)&nbsp;[![Code Coverage](https://codecov.io/gh/kubev2v/forklift/branch/main/graph/badge.svg?token=VV6EBWKJGB)](https://codecov.io/gh/kubev2v/forklift)
+# MTV Ansible Hook Examples
 
-# Forklift
-Migrates virtual machines at scale to Kubernetes KubeVirt.
-Migrations are performed in a few simple steps, first by providing source and destination credentials,
-then mapping the source and destination infrastructure and creating a choreographed plan, and finally,
-executing the migration effort.
-![diagram.png](docs/diagram.png)
+This repository contains practical Ansible playbook examples for use with Migration Toolkit for Virtualization (MTV) hooks.
 
-## Features
-- **Warm migration** using Change Block Tracking/Incremental Backup to reduce the downtime, supported in VMware and oVirt migrations.
-- For VMware migrations, the Forklift uses [virt-v2v](https://libguestfs.org/virt-v2v.1.html) **guest conversions** which installs the virtio drivers and edits the guest to run on QEMU-KVM.
-- Migrating to **remote clusters**, user can install the Forklift on one cluster and orchestrate other cluster to do the migration.
-- Migrating VMs **between clusters** using the KubeVirt [Export API](https://kubevirt.io/user-guide/storage/export_api/).
-- **Validations** of the Virtual Machines to let users know if migration plan has issues that need to be addressed before running.
----
+## What are MTV Hooks?
 
-## Deploy
-Deploy the Forklift operator index to the cluster.
+MTV hooks allow you to run custom Ansible playbooks at specific points during VM migration:
+- **PreHooks**: Run before migration starts (on the source VM)
+- **PostHooks**: Run after migration completes (on the migrated VM)
 
-For single-architecture deployment (development):
-```bash
-make deploy-operator-index PLATFORM=linux/amd64 REGISTRY_TAG=latest
-```
+## Examples Included
 
-For multi-architecture deployment (production):
-```bash
-make deploy-operator-index-multiarch REGISTRY_TAG=latest
-```
+### 1. PreHook: Preserve Network Interface Names
+**Location**: `ansible/prehook-preserve-interface-names/`
 
+This playbook creates udev rules to preserve network interface names during migration. This is critical for VMs using DHCP where interface name changes would break network configuration.
 
-## Build
-Custom build of the controller, bundle and index which will be deployed to the cluster
-```bash
-export REGISTRY_ORG=user
-make push-controller-image \
-     push-operator-bundle-image \
-     push-operator-index-image \
-     deploy-operator-index
-```
-Note: The order of targets is important as the bundle needs to be created after controller and index after bundle.
+**What it does**:
+- Discovers all network interfaces and their MAC addresses on the source VM
+- Creates persistent udev rules to bind interface names to MAC addresses
+- Ensures interface names remain consistent after migration (e.g., eth0 stays eth0)
+- Includes verification script for post-migration testing
 
-### Multi-Architecture Builds
+**Use case**: Prevents network configuration breakage for DHCP-configured VMs
 
-For information about building images for multiple architectures (AMD64, ARM64) and creating multi-arch manifests, see the [Cross-Platform Build Support](docs/enhancements/cross-platform-build-support.md) enhancement document.
+### 2. PostHook: Install Prometheus Node Exporter
+**Location**: `ansible/posthook-node-exporter/`
 
-## Development
+This playbook installs and configures Prometheus node_exporter for monitoring after migration completes.
 
-### Commit Message Format
+**What it does**:
+- Installs node_exporter monitoring agent
+- Configures systemd service
+- Sets up firewall rules
+- Demonstrates post-migration automation pattern
 
-All commits must include one of these formats in the **commit description** (the body of the commit message):
+## Getting Started
 
-**Primary format**: `Resolves: MTV-<number>`
+See [TESTING.md](TESTING.md) for comprehensive instructions on:
+- Prerequisites and setup
+- How to use these examples in your migrations
+- Step-by-step testing procedures
+- Expected outputs and success criteria
+- Troubleshooting common issues
+- Customization examples
 
-Example commit:
-```
-Subject: Fix bug in data processing
-Description: Resolves: MTV-123
-```
+## Quick Start
 
-**Exclusion format**: `Resolves: None`
+1. Create SSH credentials secret (see `ansible/*/ssh-secret.yaml`)
+2. Encode your playbook: `base64 -i playbook.yml`
+3. Create Hook CR with encoded playbook (see `ansible/*/hook-cr.yaml`)
+4. Reference the hook in your MTV migration plan
 
-Example commit:
-```
-Subject: Update documentation
-Description: Resolves: None
-```
+## Documentation
 
-**Chore commits**: Any commit containing "chore" in the message (case insensitive) is automatically skipped.
+- [MTV Hooks Documentation](https://access.redhat.com/documentation/en-us/migration_toolkit_for_virtualization/)
+- [Detailed Testing Guide](TESTING.md)
 
-Example chore commits:
-```
-chore: update dependencies
-CHORE: clean up build files
-Update dependencies and chore tasks
-```
+## Contributing
 
-**Note**: The commit description validation is enforced via a GitHub Action that runs on all branches for push and pull request events. The validation automatically skips:
-- Bot users (dependabot, renovate, ci, github-actions, etc.)
-- Commits containing "chore" in the message (case insensitive)
+These examples are meant to serve as reference implementations. Feel free to customize them for your specific migration needs.
 
-### Local Validation
+## Related
 
-You can validate commit messages locally using the provided script or Makefile targets:
+- Main MTV Project: [kubev2v/forklift](https://github.com/kubev2v/forklift)
+- Issue: [MTV-3660](https://issues.redhat.com/browse/MTV-3660)
 
-**Using Makefile targets:**
-```bash
-# Validate the latest commit
-make validate-commits
-
-# Validate a range of commits
-make validate-commits-range RANGE="HEAD~5..HEAD"
-```
-
-**Using the script directly:**
-```bash
-# Validate the latest commit
-./scripts/validate-commits.sh
-
-# Validate a range of commits
-./scripts/validate-commits.sh --range HEAD~5..HEAD
-
-# Validate with verbose output
-./scripts/validate-commits.sh --verbose
-
-# Get help
-./scripts/validate-commits.sh --help
-```
-
-### Detailed Commit Message Guide
-
-For comprehensive information about commit message formatting, supported issue tracking systems, and troubleshooting, see [COMMIT_MESSAGE_GUIDE.md](./COMMIT_MESSAGE_GUIDE.md).
-
-### Configuration
-
-| Name                       | Default value                                  | Description                                                            |
-|----------------------------|------------------------------------------------|------------------------------------------------------------------------|
-| REGISTRY_TAG               | devel                                          | The tag with which the image will be built and pushed to the registry. |
-| REGISTRY_ORG               | kubev2v                                        | The registry organization to which the built image should be pushed.   |
-| REGISTRY                   | quay.io                                        | The registry address to which the images should be pushed.             |
-| PLATFORM                   | linux/amd64                                    | The target platform for container image builds (e.g.: linux/arm64, linux/amd64). |
-| CONTAINER_CMD              | autodetected                                   | The container runtime command (e.g.: /usr/bin/podman)                  |
-| VERSION                    | 99.0.0                                         | The version with which the forklift should be built.                   |
-| NAMESPACE                  | konveyor-forklift                              | The namespace in which the operator should be installed.               |
-| CHANNELS                   | development                                    | The olm channels.                                                      |
-| DEFAULT_CHANNEL            | development                                    | The default olm channel.                                               |
-| OPERATOR_IMAGE             | quay.io/kubev2v/forklift-operator:latest       | The forklift operator image with the ansible-operator role.            |
-| CONTROLLER_IMAGE           | quay.io/kubev2v/forklift-controller:latest     | The forklift controller image.                                         |
-| MUST_GATHER_IMAGE          | quay.io/kubev2v/forklift-must-gather:latest    | The forklift must gather an image.                                     |
-| UI_PLUGIN_IMAGE            | quay.io/kubev2v/forklift-console-plugin:latest | The forklift OKD/OpenShift UI plugin image.                            |
-| VALIDATION_IMAGE           | quay.io/kubev2v/forklift-validation:latest     | The forklift validation image.                                         |
-| VIRT_V2V_IMAGE             | quay.io/kubev2v/forklift-virt-v2v:latest       | The forklift virt v2v image for cold migration.                        |
-| VDDK_IMAGE                 |                                                | The default Virtual Disk Development Kit (VDDK) image, default empty.  |
-| POPULATOR_CONTROLLER_IMAGE | quay.io/kubev2v/populator-controller:latest    | The forklift volume-populator controller image.                        |
-| OVIRT_POPULATOR_IMAGE      | quay.io/kubev2v/ovirt-populator:latest         | The oVirt populator image.                                             |

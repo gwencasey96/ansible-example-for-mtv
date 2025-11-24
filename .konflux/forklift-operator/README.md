@@ -1,1 +1,0 @@
-This is just a placeholder directory as forklift-operator container does not need RPM prefetch

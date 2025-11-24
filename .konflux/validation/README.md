@@ -1,1 +1,0 @@
-This is just a placeholder directory as validation container does not need RPM prefetch
