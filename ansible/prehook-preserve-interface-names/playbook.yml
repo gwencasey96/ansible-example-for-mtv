@@ -2,26 +2,52 @@
 # PreHook: Create udev rules to preserve network interface names
 # This ensures interface names remain consistent after migration to OpenShift Virtualization
 # Critical for VMs that rely on specific interface names for configuration
+# This also helps preserve DHCP addresses by ensuring interface names don't change
 
 - name: PreHook - Setup SSH and load MTV metadata
   hosts: localhost
   gather_facts: yes
+  vars:
+    # IMPORTANT: The SSH secret must be in the namespace where the hook runs,
+    # NOT in the target namespace. Hooks run in the MTV operator namespace
+    # (typically 'konveyor-forklift' for upstream or 'openshift-mtv' for downstream).
+    # 
+    # To override the namespace, set ssh_secret_namespace variable when creating the Hook CR,
+    # or modify this default value in the playbook before encoding.
+    #
+    # Example: If your secret is in 'mtv-test', set: ssh_secret_namespace: "mtv-test"
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default('konveyor-forklift') }}"
+    ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
   tasks:
     - name: Load migration Plan metadata
       include_vars:
         file: plan.yml
         name: plan
+      ignore_errors: yes
+      failed_when: false
 
     - name: Load VM workload metadata
       include_vars:
         file: workload.yml
         name: workload
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Validate workload metadata is loaded
+      assert:
+        that:
+          - workload is defined
+          - workload.vm is defined
+          - workload.vm.ipaddress is defined
+        fail_msg: "Failed to load workload metadata. Ensure plan.yml and workload.yml are available."
+        success_msg: "Workload metadata loaded successfully"
 
     - name: Get current user info for SSH setup
       getent:
         database: passwd
         key: "{{ ansible_user_id }}"
         split: ':'
+      ignore_errors: yes
 
     - name: Ensure SSH directory exists
       file:
@@ -29,96 +55,210 @@
         state: directory
         mode: 0750
       environment:
-        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] }}"
+        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] | default('/root') }}"
+      ignore_errors: yes
 
     - name: Retrieve SSH credentials from Kubernetes Secret
       k8s_info:
         api_version: v1
         kind: Secret
-        name: vm-ssh-credentials
-        namespace: konveyor-forklift
+        name: "{{ ssh_secret_name }}"
+        # NOTE: This namespace is where the hook runs (MTV operator namespace),
+        # NOT the target namespace where VMs are migrated to.
+        # The secret must exist in this namespace for the hook to access it.
+        namespace: "{{ ssh_secret_namespace }}"
       register: ssh_credentials
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Check if SSH credentials were found
+      set_fact:
+        ssh_secret_found: "{{ ssh_credentials.resources is defined and ssh_credentials.resources | length > 0 }}"
+      when: ssh_credentials is defined
+
+    - name: Validate SSH credentials were retrieved
+      assert:
+        that:
+          - ssh_credentials is defined
+          - ssh_credentials.resources is defined
+          - ssh_credentials.resources | length > 0
+          - ssh_credentials.resources[0].data is defined
+          - ssh_credentials.resources[0].data.key is defined
+        fail_msg: |
+          Failed to retrieve SSH credentials from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'.
+          
+          IMPORTANT: The secret must be in the namespace where the hook runs ({{ ssh_secret_namespace }}),
+          NOT in the target namespace where VMs are migrated to.
+          
+          Possible issues:
+          1. Secret does not exist - Create it with: oc create secret generic {{ ssh_secret_name }} --from-file=key=/path/to/key -n {{ ssh_secret_namespace }}
+          2. Secret is in a different namespace - Update ssh_secret_namespace variable in the playbook or Hook CR
+          3. Secret does not contain a 'key' field - Ensure the secret has a 'key' field with base64-encoded SSH private key
+          
+          Current namespace being checked: {{ ssh_secret_namespace }}
+          Secret name: {{ ssh_secret_name }}
+        success_msg: "SSH credentials retrieved successfully from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'"
 
     - name: Create SSH private key file
       copy:
         dest: ~/.ssh/mtv_migration_key
         content: "{{ ssh_credentials.resources[0].data.key | b64decode }}"
         mode: 0600
+      environment:
+        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] | default('/root') }}"
+      no_log: true  # Don't log the key content
+      when:
+        - ssh_credentials is defined
+        - ssh_credentials.resources is defined
+        - ssh_credentials.resources | length > 0
+        - ssh_credentials.resources[0].data is defined
+        - ssh_credentials.resources[0].data.key is defined
 
     - name: Add target VM to Ansible inventory
       add_host:
         name: "{{ workload.vm.ipaddress }}"
         ansible_user: root
         ansible_ssh_private_key_file: ~/.ssh/mtv_migration_key
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'
+        ansible_ssh_retries: 3
         groups: target_vms
 
 - name: Create udev rules to preserve interface names on target VM
   hosts: target_vms
   gather_facts: yes
+  vars:
+    udev_rules_file: /etc/udev/rules.d/70-persistent-net.rules
   tasks:
+    - name: Test SSH connectivity to VM
+      ping:
+      register: ping_result
+      retries: 3
+      delay: 5
+      until: ping_result is succeeded
+      ignore_errors: yes
+
+    - name: Fail if SSH connection cannot be established
+      fail:
+        msg: "Cannot establish SSH connection to VM at {{ workload.vm.ipaddress }}. Check SSH credentials and network connectivity."
+      when: ping_result is failed or ping_result is skipped
+
     - name: Gather network interface information
       shell: |
-        for iface in $(ls /sys/class/net/ | grep -v lo); do
-          mac=$(cat /sys/class/net/$iface/address)
-          echo "$iface:$mac"
+        for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+          if [ -f /sys/class/net/$iface/address ]; then
+            mac=$(cat /sys/class/net/$iface/address 2>/dev/null)
+            if [ -n "$mac" ] && [ "$mac" != "00:00:00:00:00:00" ]; then
+              echo "$iface:$mac"
+            fi
+          fi
         done
       register: interface_info
       changed_when: false
+      failed_when: false
+      ignore_errors: yes
+
+    - name: Validate interfaces were discovered
+      assert:
+        that:
+          - interface_info.stdout_lines is defined
+          - interface_info.stdout_lines | length > 0
+        fail_msg: "No network interfaces found on the VM. This may indicate a problem with the VM's network configuration."
+        success_msg: "Discovered {{ interface_info.stdout_lines | length }} network interface(s)"
 
     - name: Parse interface information
       set_fact:
         interfaces: "{{ interfaces | default([]) + [{'name': item.split(':')[0], 'mac': item.split(':')[1]}] }}"
       loop: "{{ interface_info.stdout_lines }}"
-      when: interface_info.stdout_lines | length > 0
+      when: 
+        - interface_info.stdout_lines is defined
+        - interface_info.stdout_lines | length > 0
+        - item is defined
+        - ':' in item
 
     - name: Display discovered interfaces
       debug:
         msg: "Found interface {{ item.name }} with MAC address {{ item.mac }}"
-      loop: "{{ interfaces }}"
+      loop: "{{ interfaces | default([]) }}"
+      when: interfaces is defined
 
     - name: Create backup directory for udev rules
       file:
         path: /etc/udev/rules.d/backup
         state: directory
         mode: 0755
+      ignore_errors: yes
 
     - name: Backup existing interface naming rules if they exist
       shell: |
-        if [ -f /etc/udev/rules.d/70-persistent-net.rules ]; then
-          cp /etc/udev/rules.d/70-persistent-net.rules /etc/udev/rules.d/backup/70-persistent-net.rules.$(date +%Y%m%d-%H%M%S)
+        if [ -f {{ udev_rules_file }} ]; then
+          cp {{ udev_rules_file }} /etc/udev/rules.d/backup/70-persistent-net.rules.$(date +%Y%m%d-%H%M%S)
+          echo "backed_up"
+        else
+          echo "no_backup_needed"
         fi
-      changed_when: false
+      register: backup_result
+      changed_when: "'backed_up' in backup_result.stdout"
+      failed_when: false
+      ignore_errors: yes
 
     - name: Create udev rules file to preserve interface names
       copy:
-        dest: /etc/udev/rules.d/70-persistent-net.rules
+        dest: "{{ udev_rules_file }}"
         content: |
           # Persistent network interface naming rules
           # Generated by MTV pre-migration hook on {{ ansible_date_time.iso8601 }}
           # These rules ensure interface names remain consistent after migration
+          # This helps preserve DHCP addresses by maintaining interface name consistency
           # DO NOT EDIT - Generated automatically
           
-          {% for iface in interfaces %}
-          # Rule for {{ iface.name }}
+          {% for iface in interfaces | default([]) %}
+          # Rule for {{ iface.name }} (MAC: {{ iface.mac }})
           SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ iface.mac }}", NAME="{{ iface.name }}"
           
           {% endfor %}
         mode: 0644
+        backup: yes
       register: udev_rules_created
+      when: interfaces is defined and interfaces | length > 0
+
+    - name: Verify udev rules file was created
+      stat:
+        path: "{{ udev_rules_file }}"
+      register: udev_file_stat
+      when: interfaces is defined and interfaces | length > 0
+
+    - name: Fail if udev rules file was not created
+      fail:
+        msg: "Failed to create udev rules file at {{ udev_rules_file }}"
+      when: 
+        - interfaces is defined
+        - interfaces | length > 0
+        - not udev_file_stat.stat.exists
 
     - name: Reload udev rules
       command: udevadm control --reload-rules
-      when: udev_rules_created.changed
+      when: 
+        - udev_rules_created.changed | default(false)
+        - udev_file_stat.stat.exists | default(false)
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Trigger udev to apply rules (if possible)
+      command: udevadm trigger --subsystem-match=net --action=add
+      when: udev_file_stat.stat.exists | default(false)
+      ignore_errors: yes
+      failed_when: false
 
     - name: Display udev rules file content
-      command: cat /etc/udev/rules.d/70-persistent-net.rules
+      command: cat "{{ udev_rules_file }}"
       register: udev_content
       changed_when: false
+      when: udev_file_stat.stat.exists | default(false)
 
     - name: Show created udev rules
       debug:
-        msg: "{{ udev_content.stdout_lines }}"
+        msg: "{{ udev_content.stdout_lines | default([]) }}"
+      when: udev_content is defined
 
     - name: Create verification script
       copy:
@@ -129,32 +269,59 @@
           # Run this after reboot to verify interfaces retain their names
           
           echo "=== Current Interface Configuration ==="
-          ip addr show | grep -E '^[0-9]+:|link/ether'
+          ip addr show | grep -E '^[0-9]+:|link/ether' || true
           
           echo ""
           echo "=== udev Rules ==="
-          cat /etc/udev/rules.d/70-persistent-net.rules
+          if [ -f /etc/udev/rules.d/70-persistent-net.rules ]; then
+            cat /etc/udev/rules.d/70-persistent-net.rules
+          else
+            echo "No udev rules file found"
+          fi
           
           echo ""
           echo "=== Interface Name to MAC Mapping ==="
-          for iface in $(ls /sys/class/net/ | grep -v lo); do
-            mac=$(cat /sys/class/net/$iface/address)
-            echo "$iface -> $mac"
+          for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+            if [ -f /sys/class/net/$iface/address ]; then
+              mac=$(cat /sys/class/net/$iface/address 2>/dev/null)
+              echo "$iface -> $mac"
+            fi
           done
+          
+          echo ""
+          echo "=== DHCP Lease Information ==="
+          if command -v dhclient >/dev/null 2>&1; then
+            dhclient -v 2>&1 | head -20 || true
+          fi
+          if [ -d /var/lib/dhcp ]; then
+            echo "DHCP lease files:"
+            ls -la /var/lib/dhcp/*.leases 2>/dev/null | head -5 || true
+          fi
         mode: 0755
+      ignore_errors: yes
 
     - name: Summary of changes
       debug:
         msg:
-          - "✓ Created udev rules for {{ interfaces | length }} network interfaces"
-          - "✓ Rules location: /etc/udev/rules.d/70-persistent-net.rules"
+          - "✓ Created udev rules for {{ interfaces | default([]) | length }} network interface(s)"
+          - "✓ Rules location: {{ udev_rules_file }}"
           - "✓ Verification script: /root/verify-interface-names.sh"
           - "✓ Interface names will be preserved after migration"
+          - "✓ This helps preserve DHCP addresses by maintaining interface name consistency"
           - ""
           - "Interfaces configured:"
-          - "{% for iface in interfaces %}  - {{ iface.name }} ({{ iface.mac }}){% endfor %}"
+          - "{% for iface in interfaces | default([]) %}  - {{ iface.name }} ({{ iface.mac }}){% endfor %}"
+      when: interfaces is defined and interfaces | length > 0
+
+    - name: Warning if no interfaces found
+      debug:
+        msg:
+          - "⚠ WARNING: No network interfaces were discovered"
+          - "The udev rules file was not created"
+          - "This may cause interface names to change after migration"
+      when: interfaces is not defined or interfaces | length == 0
 
     - name: Log completion
       debug:
-        msg: "udev rules created successfully on {{ inventory_hostname }} for interface name preservation"
-
+        msg: "PreHook completed successfully on {{ inventory_hostname }}. Interface name preservation configured for {{ interfaces | default([]) | length }} interface(s)."
+      when: interfaces is defined

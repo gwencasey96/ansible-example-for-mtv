@@ -5,6 +5,17 @@
 - name: PostHook - Setup SSH and load MTV metadata
   hosts: localhost
   gather_facts: yes
+  vars:
+    # IMPORTANT: The SSH secret must be in the namespace where the hook runs,
+    # NOT in the target namespace. Hooks run in the MTV operator namespace
+    # (typically 'konveyor-forklift' for upstream or 'openshift-mtv' for downstream).
+    # 
+    # To override the namespace, set ssh_secret_namespace variable when creating the Hook CR,
+    # or modify this default value in the playbook before encoding.
+    #
+    # Example: If your secret is in 'mtv-test', set: ssh_secret_namespace: "mtv-test"
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default('konveyor-forklift') }}"
+    ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
   tasks:
     - name: Load migration Plan metadata
       include_vars:
@@ -34,15 +45,49 @@
       k8s_info:
         api_version: v1
         kind: Secret
-        name: vm-ssh-credentials
-        namespace: konveyor-forklift
+        name: "{{ ssh_secret_name }}"
+        # NOTE: This namespace is where the hook runs (MTV operator namespace),
+        # NOT the target namespace where VMs are migrated to.
+        # The secret must exist in this namespace for the hook to access it.
+        namespace: "{{ ssh_secret_namespace }}"
       register: ssh_credentials
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Validate SSH credentials were retrieved
+      assert:
+        that:
+          - ssh_credentials is defined
+          - ssh_credentials.resources is defined
+          - ssh_credentials.resources | length > 0
+          - ssh_credentials.resources[0].data is defined
+          - ssh_credentials.resources[0].data.key is defined
+        fail_msg: |
+          Failed to retrieve SSH credentials from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'.
+          
+          IMPORTANT: The secret must be in the namespace where the hook runs ({{ ssh_secret_namespace }}),
+          NOT in the target namespace where VMs are migrated to.
+          
+          Possible issues:
+          1. Secret does not exist - Create it with: oc create secret generic {{ ssh_secret_name }} --from-file=key=/path/to/key -n {{ ssh_secret_namespace }}
+          2. Secret is in a different namespace - Update ssh_secret_namespace variable in the playbook or Hook CR
+          3. Secret does not contain a 'key' field - Ensure the secret has a 'key' field with base64-encoded SSH private key
+          
+          Current namespace being checked: {{ ssh_secret_namespace }}
+          Secret name: {{ ssh_secret_name }}
+        success_msg: "SSH credentials retrieved successfully from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'"
 
     - name: Create SSH private key file
       copy:
         dest: ~/.ssh/mtv_migration_key
         content: "{{ ssh_credentials.resources[0].data.key | b64decode }}"
         mode: 0600
+      when:
+        - ssh_credentials is defined
+        - ssh_credentials.resources is defined
+        - ssh_credentials.resources | length > 0
+        - ssh_credentials.resources[0].data is defined
+        - ssh_credentials.resources[0].data.key is defined
 
     - name: Add target VM to Ansible inventory
       add_host:
@@ -121,22 +166,37 @@
         state: started
         enabled: yes
 
-    - name: Open firewall port for node_exporter (firewalld)
-      firewalld:
-        port: "{{ node_exporter_port }}/tcp"
-        permanent: yes
-        state: enabled
-        immediate: yes
-      when: ansible_facts.services['firewalld.service'] is defined
+    - name: Check if firewalld is installed
+      command: systemctl is-active firewalld
+      register: firewalld_status
+      changed_when: false
+      failed_when: false
       ignore_errors: yes
 
-    - name: Open firewall port for node_exporter (ufw)
-      ufw:
-        rule: allow
-        port: "{{ node_exporter_port }}"
-        proto: tcp
-      when: ansible_facts.services['ufw.service'] is defined
+    - name: Open firewall port for node_exporter (firewalld) using firewall-cmd
+      shell: |
+        firewall-cmd --permanent --add-port={{ node_exporter_port }}/tcp
+        firewall-cmd --reload
+      when: 
+        - firewalld_status.rc == 0
+        - firewalld_status.stdout == "active"
       ignore_errors: yes
+      failed_when: false
+
+    - name: Check if ufw is installed
+      command: systemctl is-active ufw
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+      ignore_errors: yes
+
+    - name: Open firewall port for node_exporter (ufw) using ufw command
+      shell: ufw allow {{ node_exporter_port }}/tcp
+      when: 
+        - ufw_status.rc == 0
+        - ufw_status.stdout == "active"
+      ignore_errors: yes
+      failed_when: false
 
     - name: Verify node_exporter is running
       uri:
