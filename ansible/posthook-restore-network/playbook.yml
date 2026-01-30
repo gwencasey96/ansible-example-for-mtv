@@ -1,0 +1,203 @@
+---
+# PostHook: Restore network state after migration (SSH-based, runs on target VM)
+# Reads /root/.mtv-network-state.json written by pre-hook on the source VM (file migrates with VM).
+# Re-asserts udev rules (MAC -> interface name) and optionally NetworkManager connection.
+
+- name: PostHook - Setup SSH and load MTV metadata (container-safe, no getent/nmcli)
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default('konveyor-forklift') }}"
+    ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
+  tasks:
+    - name: Load migration Plan metadata
+      include_vars:
+        file: plan.yml
+        name: plan
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Load VM workload metadata
+      include_vars:
+        file: workload.yml
+        name: workload
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Validate workload metadata is loaded
+      assert:
+        that:
+          - workload is defined
+          - workload.vm is defined
+          - workload.vm.ipaddress is defined
+        fail_msg: "Failed to load workload metadata. Ensure plan.yml and workload.yml are available."
+        success_msg: "Workload metadata loaded successfully"
+
+    - name: Set HOME for SSH (container-safe, no getent)
+      set_fact:
+        ssh_home: "{{ lookup('env', 'HOME') | default('/root', true) }}"
+
+    - name: Ensure SSH directory exists
+      file:
+        path: "{{ ssh_home }}/.ssh"
+        state: directory
+        mode: 0750
+      ignore_errors: yes
+
+    - name: Retrieve SSH credentials from Kubernetes Secret
+      k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ ssh_secret_name }}"
+        namespace: "{{ ssh_secret_namespace }}"
+      register: ssh_credentials
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Validate SSH credentials were retrieved
+      assert:
+        that:
+          - ssh_credentials is defined
+          - ssh_credentials.resources is defined
+          - ssh_credentials.resources | length > 0
+          - ssh_credentials.resources[0].data is defined
+          - ssh_credentials.resources[0].data.key is defined
+        fail_msg: "Failed to retrieve SSH credentials from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'."
+        success_msg: "SSH credentials retrieved successfully"
+
+    - name: Create SSH private key file
+      copy:
+        dest: "{{ ssh_home }}/.ssh/mtv_migration_key"
+        content: "{{ ssh_credentials.resources[0].data.key | b64decode }}"
+        mode: 0600
+      no_log: true
+      when:
+        - ssh_credentials.resources is defined
+        - ssh_credentials.resources | length > 0
+        - ssh_credentials.resources[0].data.key is defined
+
+    - name: Add target VM to Ansible inventory
+      add_host:
+        name: "{{ workload.vm.ipaddress }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_home }}/.ssh/mtv_migration_key"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'
+        ansible_ssh_retries: 3
+        groups: target_vms
+
+- name: Restore network state on target VM (all tasks run on VM via SSH)
+  hosts: target_vms
+  gather_facts: yes
+  vars:
+    udev_rules_file: /etc/udev/rules.d/70-persistent-net.rules
+    state_file: /root/.mtv-network-state.json
+  tasks:
+    - name: Test SSH connectivity to VM
+      ping:
+      register: ping_result
+      retries: 3
+      delay: 5
+      until: ping_result is succeeded
+      ignore_errors: yes
+
+    - name: Fail if SSH connection cannot be established
+      fail:
+        msg: "Cannot establish SSH connection to VM at {{ inventory_hostname }}. Check SSH credentials and network connectivity."
+      when: ping_result is failed or ping_result is skipped
+
+    - name: Check if network state file exists (written by pre-hook, migrated with VM)
+      stat:
+        path: "{{ state_file }}"
+      register: state_file_stat
+
+    - name: Read network state from file (run on VM)
+      slurp:
+        src: "{{ state_file }}"
+      register: state_raw
+      when: state_file_stat.stat.exists | default(false)
+
+    - name: Parse network state JSON
+      set_fact:
+        network_state: "{{ (state_raw.content | b64decode) | from_json }}"
+      when: state_file_stat.stat.exists | default(false) and state_raw.content is defined
+
+    - name: Ensure we have interfaces from state (use state or fallback to current VM interfaces)
+      set_fact:
+        interfaces: "{{ network_state.interfaces | default([]) }}"
+      when: network_state is defined
+
+    - name: Gather current interfaces if state file missing (fallback)
+      shell: |
+        for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+          [ -f /sys/class/net/$iface/address ] || continue
+          mac=$(cat /sys/class/net/$iface/address 2>/dev/null)
+          [ -n "$mac" ] && [ "$mac" != "00:00:00:00:00:00" ] && echo "$iface:$mac"
+        done
+      register: interface_info_fallback
+      when: (not (state_file_stat.stat.exists | default(false))) or (network_state is defined and (network_state.interfaces | default([]) | length == 0))
+      changed_when: false
+      failed_when: false
+
+    - name: Set interfaces from fallback (current VM only)
+      set_fact:
+        interfaces: "{{ interfaces | default([]) + [{'name': item.split(':')[0], 'mac': item.split(':')[1]}] }}"
+      loop: "{{ interface_info_fallback.stdout_lines | default([]) }}"
+      when:
+        - (not (state_file_stat.stat.exists | default(false))) or (network_state is defined and (network_state.interfaces | default([]) | length == 0))
+        - interface_info_fallback.stdout_lines is defined
+        - interface_info_fallback.stdout_lines | length > 0
+        - item is search(':')
+
+    - name: Create udev rules to preserve interface names (re-assert MAC binding)
+      copy:
+        dest: "{{ udev_rules_file }}"
+        content: |
+          # Persistent network interface naming - restored by MTV post-hook on {{ ansible_date_time.iso8601 }}
+          # DO NOT EDIT - Generated automatically
+          {% for iface in interfaces | default([]) %}
+          SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ iface.mac }}", NAME="{{ iface.name }}"
+          {% endfor %}
+        mode: 0644
+      when: interfaces is defined and interfaces | length > 0
+
+    - name: Reload udev rules
+      command: udevadm control --reload-rules
+      when: interfaces is defined and interfaces | length > 0
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Trigger udev for network subsystem
+      command: udevadm trigger --subsystem-match=net --action=add
+      when: interfaces is defined and interfaces | length > 0
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Re-apply NM connection by UUID (one per entry with nm_uuid)
+      shell: "nmcli connection up uuid '{{ item.nm_uuid }}' 2>/dev/null || true"
+      loop: "{{ network_state.nm_entries | default([]) | selectattr('nm_uuid') | list }}"
+      when:
+        - network_state is defined
+        - network_state.nm_entries is defined
+        - item.nm_uuid | length > 0
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Request DHCP renewal on interfaces (run on VM)
+      shell: |
+        if command -v dhclient >/dev/null 2>&1; then
+          for dev in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+            dhclient -r "$dev" 2>/dev/null || true
+            dhclient "$dev" 2>/dev/null || true
+          done
+        fi
+      when: interfaces is defined and interfaces | length > 0
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Summary of network restore
+      debug:
+        msg:
+          - "PostHook network restore completed on {{ inventory_hostname }}"
+          - "Udev rules re-applied for {{ interfaces | default([]) | length }} interface(s)"
+          - "NM re-apply attempted when state file and nm_uuid present"
+      when: interfaces is defined

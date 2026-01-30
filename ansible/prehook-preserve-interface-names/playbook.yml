@@ -42,20 +42,16 @@
         fail_msg: "Failed to load workload metadata. Ensure plan.yml and workload.yml are available."
         success_msg: "Workload metadata loaded successfully"
 
-    - name: Get current user info for SSH setup
-      getent:
-        database: passwd
-        key: "{{ ansible_user_id }}"
-        split: ':'
-      ignore_errors: yes
+    # Use env HOME or /root - do NOT use getent (not available in bare Ansible container)
+    - name: Set HOME for SSH key and directory (container-safe)
+      set_fact:
+        ssh_home: "{{ lookup('env', 'HOME') | default('/root', true) }}"
 
     - name: Ensure SSH directory exists
       file:
-        path: ~/.ssh
+        path: "{{ ssh_home }}/.ssh"
         state: directory
         mode: 0750
-      environment:
-        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] | default('/root') }}"
       ignore_errors: yes
 
     - name: Retrieve SSH credentials from Kubernetes Secret
@@ -101,11 +97,9 @@
 
     - name: Create SSH private key file
       copy:
-        dest: ~/.ssh/mtv_migration_key
+        dest: "{{ ssh_home }}/.ssh/mtv_migration_key"
         content: "{{ ssh_credentials.resources[0].data.key | b64decode }}"
         mode: 0600
-      environment:
-        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] | default('/root') }}"
       no_log: true  # Don't log the key content
       when:
         - ssh_credentials is defined
@@ -118,7 +112,7 @@
       add_host:
         name: "{{ workload.vm.ipaddress }}"
         ansible_user: root
-        ansible_ssh_private_key_file: ~/.ssh/mtv_migration_key
+        ansible_ssh_private_key_file: "{{ ssh_home }}/.ssh/mtv_migration_key"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'
         ansible_ssh_retries: 3
         groups: target_vms
@@ -180,6 +174,41 @@
         msg: "Found interface {{ item.name }} with MAC address {{ item.mac }}"
       loop: "{{ interfaces | default([]) }}"
       when: interfaces is defined
+
+    # Capture NetworkManager connection UUID and DHCP-assigned IP (run on VM via SSH)
+    - name: Capture NM connection UUID and DHCP IP for active interfaces (nmcli if available)
+      shell: |
+        for dev in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+          [ ! -f /sys/class/net/$dev/address ] && continue
+          mac=$(cat /sys/class/net/$dev/address 2>/dev/null)
+          [ -z "$mac" ] && continue
+          ip=""
+          uuid=""
+          if command -v nmcli >/dev/null 2>&1; then
+            uuid=$(nmcli -t -g connection.uuid connection show device "$dev" 2>/dev/null || true)
+            ip=$(nmcli -t -g ip4.addresses connection show device "$dev" 2>/dev/null | head -1 | cut -d'/' -f1 || true)
+          fi
+          [ -z "$ip" ] && ip=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d'/' -f1 | head -1 || true)
+          echo "$dev|$mac|${uuid:-}|${ip:-}"
+        done
+      register: nm_capture
+      changed_when: false
+      failed_when: false
+
+    - name: Parse NM capture into list of dicts (device, mac, nm_uuid, dhcp_ip)
+      set_fact:
+        nm_entries: "{{ nm_entries | default([]) + [{'device': _p[0] | default(''), 'mac': _p[1] | default(''), 'nm_uuid': _p[2] | default(''), 'dhcp_ip': _p[3] | default('')}] }}"
+      loop: "{{ nm_capture.stdout_lines | default([]) }}"
+      vars:
+        _p: "{{ item.split('|') }}"
+      when: nm_capture.stdout_lines is defined and ('|' in item) and (item.split('|') | length >= 2)
+
+    - name: Write network state file on VM for post-hook (migrates with VM)
+      copy:
+        dest: /root/.mtv-network-state.json
+        content: "{{ {'interfaces': interfaces | default([]), 'nm_entries': nm_entries | default([]), 'source_ip': workload.vm.ipaddress | default(''), 'captured_at': ansible_date_time.iso8601} | to_nice_json }}"
+        mode: 0600
+      when: interfaces is defined and interfaces | length > 0
 
     - name: Create backup directory for udev rules
       file:

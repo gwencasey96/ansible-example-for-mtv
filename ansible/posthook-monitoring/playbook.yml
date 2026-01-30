@@ -27,19 +27,17 @@
         file: workload.yml
         name: workload
 
-    - name: Get current user info for SSH setup
-      getent:
-        database: passwd
-        key: "{{ ansible_user_id }}"
-        split: ':'
+    # Container-safe: use env HOME or /root (no getent - not in bare Ansible container)
+    - name: Set HOME for SSH (container-safe)
+      set_fact:
+        ssh_home: "{{ lookup('env', 'HOME') | default('/root', true) }}"
 
     - name: Ensure SSH directory exists
       file:
-        path: ~/.ssh
+        path: "{{ ssh_home }}/.ssh"
         state: directory
         mode: 0750
-      environment:
-        HOME: "{{ ansible_facts.getent_passwd[ansible_user_id][4] }}"
+      ignore_errors: yes
 
     - name: Retrieve SSH credentials from Kubernetes Secret
       k8s_info:
@@ -79,9 +77,10 @@
 
     - name: Create SSH private key file
       copy:
-        dest: ~/.ssh/mtv_migration_key
+        dest: "{{ ssh_home }}/.ssh/mtv_migration_key"
         content: "{{ ssh_credentials.resources[0].data.key | b64decode }}"
         mode: 0600
+      no_log: true
       when:
         - ssh_credentials is defined
         - ssh_credentials.resources is defined
@@ -93,8 +92,8 @@
       add_host:
         name: "{{ workload.vm.ipaddress }}"
         ansible_user: root
-        ansible_ssh_private_key_file: ~/.ssh/mtv_migration_key
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        ansible_ssh_private_key_file: "{{ ssh_home }}/.ssh/mtv_migration_key"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'
         groups: target_vms
 
 - name: Install monitoring on target VM
@@ -166,35 +165,21 @@
         state: started
         enabled: yes
 
-    - name: Check if firewalld is installed
-      command: systemctl is-active firewalld
-      register: firewalld_status
-      changed_when: false
-      failed_when: false
-      ignore_errors: yes
-
-    - name: Open firewall port for node_exporter (firewalld) using firewall-cmd
+    # Firewall: run on VM via SSH; use shell only (no firewalld/ufw Ansible modules - VM may not have them)
+    - name: Open firewall port for node_exporter (firewalld) if present on VM
       shell: |
-        firewall-cmd --permanent --add-port={{ node_exporter_port }}/tcp
-        firewall-cmd --reload
-      when: 
-        - firewalld_status.rc == 0
-        - firewalld_status.stdout == "active"
+        if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+          firewall-cmd --permanent --add-port={{ node_exporter_port }}/tcp
+          firewall-cmd --reload
+        fi
       ignore_errors: yes
       failed_when: false
 
-    - name: Check if ufw is installed
-      command: systemctl is-active ufw
-      register: ufw_status
-      changed_when: false
-      failed_when: false
-      ignore_errors: yes
-
-    - name: Open firewall port for node_exporter (ufw) using ufw command
-      shell: ufw allow {{ node_exporter_port }}/tcp
-      when: 
-        - ufw_status.rc == 0
-        - ufw_status.stdout == "active"
+    - name: Open firewall port for node_exporter (ufw) if present on VM
+      shell: |
+        if command -v ufw >/dev/null 2>&1 && systemctl is-active ufw >/dev/null 2>&1; then
+          ufw allow {{ node_exporter_port }}/tcp
+        fi
       ignore_errors: yes
       failed_when: false
 

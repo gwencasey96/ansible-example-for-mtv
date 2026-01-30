@@ -6,7 +6,9 @@ This directory contains simple, working examples of Ansible playbooks for Migrat
 
 MTV hooks let you run Ansible playbooks at specific points during VM migration:
 - **PreHook**: Runs before migration starts (e.g., prepare the VM)
-- **PostHook**: Runs after migration completes (e.g., install monitoring, cleanup)
+- **PostHook**: Runs after migration completes (e.g., restore network, install monitoring)
+
+**Important:** Hooks run inside a bare Ansible (hook-runner) container that does *not* have tools like `firewalld`, `nmcli`, `dbus`, or `getent`. Playbooks must be **container-safe** on localhost (use `lookup('env', 'HOME')` instead of `getent`, avoid firewall/NM modules on localhost) and perform all VM-specific work **via SSH** so that commands run on the VM where those tools may exist.
 
 ## Quick Start
 
@@ -22,16 +24,23 @@ kubectl create secret generic vm-ssh-credentials \
 
 ### 2. Choose an example
 
-- **prehook-cloud-init/**: Install cloud-init before migration
-- **posthook-monitoring/**: Install node_exporter monitoring after migration
+- **prehook-preserve-interface-names/**: Capture interface/MAC/NM/DHCP state and create udev rules on the source VM (SSH-based)
+- **posthook-restore-network/**: Restore udev and NetworkManager state on the target VM from pre-hook state file (SSH-based)
+- **posthook-monitoring/**: Install node_exporter monitoring on the target VM (SSH-based; firewall steps optional)
 
 ### 3. Apply the Hook CR
 
 ```bash
-kubectl apply -f prehook-cloud-init/hook-cr.yaml
+# PreHook: preserve interface names + NM/DHCP state
+kubectl apply -f prehook-preserve-interface-names/hook-cr.yaml
+
+# PostHook (optional): restore network state after migration
+kubectl apply -f posthook-restore-network/hook-cr.yaml
 ```
 
 ### 4. Reference the hook in your migration Plan
+
+You don't paste the playbook into the UI—you reference the Hook by name. In your Plan (UI or YAML), add hooks to the VM:
 
 ```yaml
 spec:
@@ -40,17 +49,25 @@ spec:
       hooks:
         - hook:
             namespace: konveyor-forklift
-            name: install-cloud-init
+            name: preserve-interface-names
           step: PreHook
+        - hook:
+            namespace: konveyor-forklift
+            name: restore-network
+          step: PostHook
 ```
+
+See [QUICKSTART-TEST-HOOKS.md](QUICKSTART-TEST-HOOKS.md) for a full test walkthrough.
 
 ## How It Works
 
 1. MTV creates a Job in the cluster when the hook is triggered
-2. The job runs the hook-runner container with your playbook
-3. The playbook connects to your VM via SSH
-4. Ansible tasks execute on the VM
+2. The job runs the hook-runner (Ansible) container with your playbook
+3. The playbook runs a small localhost play (load plan/workload, fetch SSH key from K8s), then adds the VM to inventory and runs the rest on the VM via SSH
+4. All VM-specific commands (udev, nmcli, firewall, etc.) execute on the VM over SSH, not in the container
 5. Migration continues after hook completes
+
+For network preservation: use the **prehook-preserve-interface-names** so the source VM gets udev rules and a state file (`/root/.mtv-network-state.json`) with interface, MAC, NM UUID, and DHCP IP. After migration, use the **posthook-restore-network** so the target VM re-applies udev and NM from that state file (which migrated with the VM).
 
 ## Customizing for Your Environment
 
