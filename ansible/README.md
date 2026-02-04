@@ -19,7 +19,7 @@ Create a Kubernetes secret with your SSH private key:
 ```bash
 kubectl create secret generic vm-ssh-credentials \
   --from-file=key=/path/to/your/private/key \
-  -n konveyor-forklift
+  -n openshift-mtv
 ```
 
 ### 2. Choose an example
@@ -48,11 +48,11 @@ spec:
     - id: vm-123
       hooks:
         - hook:
-            namespace: konveyor-forklift
+            namespace: openshift-mtv
             name: preserve-interface-names
           step: PreHook
         - hook:
-            namespace: konveyor-forklift
+            namespace: openshift-mtv
             name: restore-network
           step: PostHook
 ```
@@ -83,7 +83,7 @@ Update the secret name in playbooks:
     api_version: v1
     kind: Secret
     name: vm-ssh-credentials  # Change this to your secret name
-    namespace: konveyor-forklift
+    namespace: openshift-mtv
   register: ssh_creds
 ```
 
@@ -120,7 +120,7 @@ Update the `ansible_user` in playbooks:
 - Verify the SSH user exists on the VM
 
 ### Playbook tasks fail
-- Check hook job logs: `kubectl logs -n konveyor-forklift job/<hook-job-name>`
+- Check hook job logs: `kubectl logs -n openshift-mtv job/<hook-job-name>`
 - Verify the VM has required packages/dependencies
 - Check that the user has sudo permissions if needed
 

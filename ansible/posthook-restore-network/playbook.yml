@@ -7,7 +7,7 @@
   hosts: localhost
   gather_facts: yes
   vars:
-    ssh_secret_namespace: "{{ ssh_secret_namespace | default('konveyor-forklift') }}"
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default('openshift-mtv') }}"
     ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
   tasks:
     - name: Load migration Plan metadata

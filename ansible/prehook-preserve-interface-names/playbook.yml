@@ -10,13 +10,13 @@
   vars:
     # IMPORTANT: The SSH secret must be in the namespace where the hook runs,
     # NOT in the target namespace. Hooks run in the MTV operator namespace
-    # (typically 'konveyor-forklift' for upstream or 'openshift-mtv' for downstream).
+    # (typically 'openshift-mtv' for downstream or 'konveyor-forklift' for upstream).
     # 
     # To override the namespace, set ssh_secret_namespace variable when creating the Hook CR,
     # or modify this default value in the playbook before encoding.
     #
     # Example: If your secret is in 'mtv-test', set: ssh_secret_namespace: "mtv-test"
-    ssh_secret_namespace: "{{ ssh_secret_namespace | default('konveyor-forklift') }}"
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default('openshift-mtv') }}"
     ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
   tasks:
     - name: Load migration Plan metadata

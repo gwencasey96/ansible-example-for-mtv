@@ -10,11 +10,11 @@ You do **not** need to build a new Forklift controller. Hooks are defined by Hoo
 
 ## 2. Create the SSH secret (once per namespace)
 
-The hook runs in the **MTV operator namespace** (e.g. `konveyor-forklift` or `openshift-mtv`). The secret must be in **that** namespace.
+The hook runs in the **MTV operator namespace** (e.g. `openshift-mtv` or `konveyor-forklift`). The secret must be in **that** namespace.
 
 ```bash
 # Replace with your MTV namespace if different (e.g. openshift-mtv)
-export MTV_NS=konveyor-forklift
+export MTV_NS=openshift-mtv
 
 # Create secret from your SSH private key (must work as root on the VM)
 kubectl create secret generic vm-ssh-credentials \
@@ -58,7 +58,7 @@ You don’t copy the playbook into the UI. You **reference** the Hook by name in
 3. Find the **Hooks** (or **Ansible hooks**) section for that VM.
 4. Add a hook:
    - **Hook:** `preserve-interface-names` (or `restore-network`, `install-monitoring`).
-   - **Namespace:** same as where you applied the Hook CR (e.g. `konveyor-forklift`).
+   - **Namespace:** same as where you applied the Hook CR (e.g. `openshift-mtv`).
    - **Step:** `PreHook` or `PostHook` as appropriate.
 5. Save the plan.
 
@@ -73,12 +73,12 @@ spec:
       hooks:
         - hook:
             name: preserve-interface-names
-            namespace: konveyor-forklift
+            namespace: openshift-mtv
           step: PreHook
         # Optional: run after migration
         - hook:
             name: restore-network
-            namespace: konveyor-forklift
+            namespace: openshift-mtv
           step: PostHook
 ```
 
@@ -100,11 +100,11 @@ apiVersion: forklift.konveyor.io/v1beta1
 kind: Migration
 metadata:
   name: my-migration-with-hooks
-  namespace: konveyor-forklift
+  namespace: openshift-mtv
 spec:
   plan:
     name: <your-plan-name>
-    namespace: konveyor-forklift
+    namespace: openshift-mtv
 EOF
 ```
 
