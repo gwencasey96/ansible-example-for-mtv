@@ -124,6 +124,25 @@ Update the `ansible_user` in playbooks:
 - Verify the VM has required packages/dependencies
 - Check that the user has sudo permissions if needed
 
+### "A playbook must be a list of plays, got ... AnsibleMapping ... spec:"
+This means the **Hook CR’s `spec.playbook`** contains the wrong content. Ansible received YAML that starts with `spec:` (a Kubernetes resource) instead of a valid playbook (a list of plays starting with `- name:` or `---` then `- name:`).
+
+**Cause:** The base64 value in `spec.playbook` was set from the wrong source—for example the full Hook CR YAML (or another K8s resource) instead of only the playbook file.
+
+**Fix:**
+1. Identify the Hook CR your plan uses (from the failed job name or Plan `spec.vms[].hooks[]`). That Hook’s `spec.playbook` must contain **only** the base64-encoded **playbook** (the contents of `playbook.yml`), not the full Hook CR or any other Kubernetes YAML.
+2. Regenerate the correct base64 and update the Hook:
+   ```bash
+   cd ansible
+   ./scripts/encode-playbook.sh prehook-preserve-interface-names/playbook.yml
+   ```
+   Copy the printed base64 string (between the `---` lines) into that Hook CR’s `spec.playbook`. If you use the repo’s Hook, edit `prehook-preserve-interface-names/hook-cr.yaml` and re-apply: `kubectl apply -f prehook-preserve-interface-names/hook-cr.yaml`.
+3. If you created the Hook via the UI with “paste playbook”, paste only the **raw playbook YAML** (or its base64), not the Hook CR YAML.
+4. Verify: decode the stored value and confirm the first line is `---` and the next meaningful line is `- name: ...`:
+   ```bash
+   echo '<your-base64-string>' | base64 -d | head -5
+   ```
+
 ## Requirements
 
 - MTV 2.6 or later
