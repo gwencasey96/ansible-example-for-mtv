@@ -8,16 +8,13 @@
   hosts: localhost
   gather_facts: yes
   vars:
-    # IMPORTANT: The SSH secret must be in the namespace where the hook runs,
-    # NOT in the target namespace. Hooks run in the MTV operator namespace
-    # (typically 'openshift-mtv' for downstream or 'konveyor-forklift' for upstream).
-    # 
-    # To override the namespace, set ssh_secret_namespace variable when creating the Hook CR,
-    # or modify this default value in the playbook before encoding.
-    #
-    # Example: If your secret is in 'mtv-test', set: ssh_secret_namespace: "mtv-test"
-    ssh_secret_namespace: "{{ ssh_secret_namespace | default('openshift-mtv') }}"
-    ssh_secret_name: "{{ ssh_secret_name | default('vm-ssh-credentials') }}"
+    # Defaults (use helper vars to avoid recursive templating when overriding via extra vars)
+    _ssh_secret_namespace_default: "openshift-mtv"
+    _ssh_secret_name_default: "vm-ssh-credentials"
+    # IMPORTANT: The SSH secret must be in the namespace where the hook runs (e.g. openshift-mtv).
+    # To override: pass extra vars ssh_secret_namespace and/or ssh_secret_name when creating the Hook.
+    ssh_secret_namespace: "{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}"
+    ssh_secret_name: "{{ ssh_secret_name | default(_ssh_secret_name_default) }}"
   tasks:
     - name: Load migration Plan metadata
       include_vars:
@@ -42,10 +39,10 @@
         fail_msg: "Failed to load workload metadata. Ensure plan.yml and workload.yml are available."
         success_msg: "Workload metadata loaded successfully"
 
-    # Use env HOME, else /tmp so we have a writable dir when container runs as non-root (e.g. OpenShift)
+    # Use /tmp for SSH dir when HOME is missing or not writable (OpenShift uses /home/runner, etc.)
     - name: Set HOME for SSH key and directory (container-safe)
       set_fact:
-        ssh_home: "{{ (lookup('env', 'HOME') | trim) if (lookup('env', 'HOME') | trim) and (lookup('env', 'HOME') | trim) != '/' else '/tmp' }}"
+        ssh_home: "{{ (lookup('env', 'HOME') | trim) if (lookup('env', 'HOME') | trim) and (lookup('env', 'HOME') | trim) not in ['/', '/home/runner'] else '/tmp' }}"
 
     - name: Ensure SSH directory exists
       file:
