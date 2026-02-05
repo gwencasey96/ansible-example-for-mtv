@@ -7,10 +7,9 @@
   hosts: localhost
   gather_facts: yes
   vars:
+    # Literal defaults only (no self-reference). To override: pass extra vars ssh_secret_namespace, ssh_secret_name.
     _ssh_secret_namespace_default: "openshift-mtv"
     _ssh_secret_name_default: "vm-ssh-credentials"
-    ssh_secret_namespace: "{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}"
-    ssh_secret_name: "{{ ssh_secret_name | default(_ssh_secret_name_default) }}"
   tasks:
     - name: Load migration Plan metadata
       include_vars:
@@ -51,8 +50,8 @@
       k8s_info:
         api_version: v1
         kind: Secret
-        name: "{{ ssh_secret_name }}"
-        namespace: "{{ ssh_secret_namespace }}"
+        name: "{{ ssh_secret_name | default(_ssh_secret_name_default) }}"
+        namespace: "{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}"
       register: ssh_credentials
       ignore_errors: yes
       failed_when: false
@@ -65,7 +64,7 @@
           - ssh_credentials.resources | length > 0
           - ssh_credentials.resources[0].data is defined
           - ssh_credentials.resources[0].data.key is defined
-        fail_msg: "Failed to retrieve SSH credentials from secret '{{ ssh_secret_name }}' in namespace '{{ ssh_secret_namespace }}'."
+        fail_msg: "Failed to retrieve SSH credentials from secret '{{ ssh_secret_name | default(_ssh_secret_name_default) }}' in namespace '{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}'."
         success_msg: "SSH credentials retrieved successfully"
 
     - name: Create SSH private key file
