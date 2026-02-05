@@ -163,11 +163,11 @@
       set_fact:
         interfaces: "{{ interfaces | default([]) + [{'name': item.split(':')[0], 'mac': item.split(':')[1]}] }}"
       loop: "{{ interface_info.stdout_lines }}"
-      when: 
+      when:
         - interface_info.stdout_lines is defined
         - interface_info.stdout_lines | length > 0
         - item is defined
-        - ':' in item
+        - "':' in item"
 
     - name: Display discovered interfaces
       debug:
@@ -201,7 +201,7 @@
       loop: "{{ nm_capture.stdout_lines | default([]) }}"
       vars:
         _p: "{{ item.split('|') }}"
-      when: nm_capture.stdout_lines is defined and ('|' in item) and (item.split('|') | length >= 2)
+      when: nm_capture.stdout_lines is defined and ("|" in item) and (item.split('|') | length >= 2)
 
     - name: Write network state file on VM for post-hook (migrates with VM)
       copy:

@@ -147,7 +147,7 @@
         - (not (state_file_stat.stat.exists | default(false))) or (network_state is defined and (network_state.interfaces | default([]) | length == 0))
         - interface_info_fallback.stdout_lines is defined
         - interface_info_fallback.stdout_lines | length > 0
-        - item is search(':')
+        - "':' in item"
 
     - name: Create udev rules to preserve interface names (re-assert MAC binding)
       copy:
