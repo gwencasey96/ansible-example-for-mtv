@@ -42,10 +42,10 @@
         fail_msg: "Failed to load workload metadata. Ensure plan.yml and workload.yml are available."
         success_msg: "Workload metadata loaded successfully"
 
-    # Use env HOME or /root - do NOT use getent (not available in bare Ansible container)
+    # Use env HOME, else /tmp so we have a writable dir when container runs as non-root (e.g. OpenShift)
     - name: Set HOME for SSH key and directory (container-safe)
       set_fact:
-        ssh_home: "{{ lookup('env', 'HOME') | default('/root', true) }}"
+        ssh_home: "{{ (lookup('env', 'HOME') | trim) if (lookup('env', 'HOME') | trim) and (lookup('env', 'HOME') | trim) != '/' else '/tmp' }}"
 
     - name: Ensure SSH directory exists
       file:

@@ -143,6 +143,11 @@ This means the **Hook CR’s `spec.playbook`** contains the wrong content. Ansib
    echo '<your-base64-string>' | base64 -d | head -5
    ```
 
+### "A playbook must be a list of plays, got ... AnsibleUnicode ..." and the offending line shows base64 (LS0t...)
+The file at `/tmp/hook/playbook.yml` contains the **raw base64 string** instead of decoded YAML. This usually means the UI **base64-encodes** whatever you paste: if you pasted base64, it was encoded again, so after one decode the file still has base64.
+
+**Fix:** In the MTV UI Ansible playbook field, paste the **raw playbook YAML** (the decoded content), not the base64. Copy the entire contents of `ansible/prehook-preserve-interface-names/playbook.yml` (from `---` through the last line) and paste that. The UI will encode it once; the controller will decode and get valid YAML.
+
 ## Requirements
 
 - MTV 2.6 or later
