@@ -8,7 +8,8 @@
   hosts: localhost
   gather_facts: yes
   vars:
-    # Literal defaults only (no self-reference). To override: pass extra vars ssh_secret_namespace, ssh_secret_name.
+    # Internal defaults - do NOT self-reference to avoid recursion
+    # To override these, pass extra vars via Hook CR (ssh_secret_namespace, ssh_secret_name)
     _ssh_secret_namespace_default: "openshift-mtv"
     _ssh_secret_name_default: "vm-ssh-credentials"
   tasks:
@@ -47,13 +48,20 @@
         mode: 0750
       ignore_errors: yes
 
+    # Determine the namespace to search for SSH secret
+    # Priority: 1) ssh_secret_namespace (extra var), 2) target namespace from plan, 3) default
+    - name: Set SSH secret namespace with fallback chain
+      set_fact:
+        _resolved_ssh_namespace: "{{ ssh_secret_namespace | default(plan.spec.targetNamespace | default(_ssh_secret_namespace_default)) }}"
+        _resolved_ssh_name: "{{ ssh_secret_name | default(_ssh_secret_name_default) }}"
+
     - name: Retrieve SSH credentials from Kubernetes Secret
       k8s_info:
         api_version: v1
         kind: Secret
-        name: "{{ ssh_secret_name | default(_ssh_secret_name_default) }}"
-        # NOTE: This namespace is where the hook runs (MTV operator namespace).
-        namespace: "{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}"
+        name: "{{ _resolved_ssh_name }}"
+        # Uses resolved namespace (extra var > target namespace > default)
+        namespace: "{{ _resolved_ssh_namespace }}"
       register: ssh_credentials
       ignore_errors: yes
       failed_when: false
@@ -72,19 +80,36 @@
           - ssh_credentials.resources[0].data is defined
           - ssh_credentials.resources[0].data.key is defined
         fail_msg: |
-          Failed to retrieve SSH credentials from secret '{{ ssh_secret_name | default(_ssh_secret_name_default) }}' in namespace '{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}'.
+          Failed to retrieve SSH credentials from secret '{{ _resolved_ssh_name }}' in namespace '{{ _resolved_ssh_namespace }}'.
           
-          IMPORTANT: The secret must be in the namespace where the hook runs ({{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}),
-          NOT in the target namespace where VMs are migrated to.
+          IMPORTANT: The secret should be in one of these namespaces (checked in order):
+          1. Custom namespace (if ssh_secret_namespace extra var is set)
+          2. Target namespace where VMs migrate: {{ plan.spec.targetNamespace | default('NOT SET') }}
+          3. Default operator namespace: {{ _ssh_secret_namespace_default }}
+          
+          Currently checked namespace: {{ _resolved_ssh_namespace }}
           
           Possible issues:
-          1. Secret does not exist - Create it with: oc create secret generic {{ ssh_secret_name | default(_ssh_secret_name_default) }} --from-file=key=/path/to/key -n {{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}
-          2. Secret is in a different namespace - Update ssh_secret_namespace variable in the playbook or Hook CR
+          1. Secret does not exist - Create it with:
+             oc create secret generic {{ _resolved_ssh_name }} --from-file=key=/path/to/key -n {{ _resolved_ssh_namespace }}
+          
+          2. Secret is in a different namespace - Either:
+             a) Move secret to {{ _resolved_ssh_namespace }}, OR
+             b) Override via Hook CR extra vars:
+                spec:
+                  extraVars:
+                    ssh_secret_namespace: your-namespace
+          
           3. Secret does not contain a 'key' field - Ensure the secret has a 'key' field with base64-encoded SSH private key
           
-          Current namespace being checked: {{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}
-          Secret name: {{ ssh_secret_name | default(_ssh_secret_name_default) }}
-        success_msg: "SSH credentials retrieved successfully from secret '{{ ssh_secret_name | default(_ssh_secret_name_default) }}' in namespace '{{ ssh_secret_namespace | default(_ssh_secret_namespace_default) }}'"
+          For testing in openshift-mtv namespace (admin only):
+          - Create secret in openshift-mtv namespace
+          - Hook will find it automatically
+          
+          For customer testing in their own namespace (e.g., mtv-test):
+          - Create secret in the target namespace (where VMs will migrate)
+          - Hook will automatically use plan.spec.targetNamespace
+        success_msg: "SSH credentials retrieved successfully from secret '{{ _resolved_ssh_name }}' in namespace '{{ _resolved_ssh_namespace }}'"
 
     - name: Create SSH private key file
       copy:
