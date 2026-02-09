@@ -29,14 +29,11 @@ Use the same key you would use to `ssh root@<source-vm-ip>`.
 From the repo root:
 
 ```bash
-# PreHook: preserve interface names + capture NM/DHCP state on source VM
+# PreHook: preserve interface names on source VM
 oc apply -f ansible/prehook-preserve-interface-names/hook-cr.yaml
 
-# Optional: PostHook to restore network state on target VM (uses state file from PreHook)
+# PostHook example: logs success only (no networking)
 oc apply -f ansible/posthook-restore-network/hook-cr.yaml
-
-# Optional: PostHook to install node_exporter on target VM
-oc apply -f ansible/posthook-monitoring/hook-cr.yaml
 ```
 
 If your Hook CRs use a different namespace, edit `metadata.namespace` in each `hook-cr.yaml` (or use `oc apply -f ... -n $MTV_NS` after setting `MTV_NS`).
@@ -57,7 +54,7 @@ You don’t copy the playbook into the UI. You **reference** the Hook by name in
 2. Select the VM(s) to migrate.
 3. Find the **Hooks** (or **Ansible hooks**) section for that VM.
 4. Add a hook:
-   - **Hook:** `preserve-interface-names` (or `restore-network`, `install-monitoring`).
+   - **Hook:** `preserve-interface-names` (or `restore-network` for posthook).
    - **Namespace:** same as where you applied the Hook CR (e.g. `openshift-mtv`).
    - **Step:** `PreHook` or `PostHook` as appropriate.
 5. Save the plan.

@@ -23,16 +23,10 @@ This playbook creates udev rules to preserve network interface names during migr
 
 **Use case**: Prevents network configuration breakage for DHCP-configured VMs
 
-### 2. PostHook: Install Prometheus Node Exporter
-**Location**: `ansible/posthook-node-exporter/`
+### 2. PostHook Example
+**Location**: `ansible/posthook-restore-network/`
 
-This playbook installs and configures Prometheus node_exporter for monitoring after migration completes.
-
-**What it does**:
-- Installs node_exporter monitoring agent
-- Configures systemd service
-- Sets up firewall rules
-- Demonstrates post-migration automation pattern
+This playbook is a minimal posthook example. It runs after migration completes and only loads MTV metadata and logs "Post hook ran successfully." It does not touch networking or SSH to the VM.
 
 ## Getting Started
 

@@ -214,61 +214,43 @@ ip addr show
 
 ---
 
-## Testing the PostHook - Install Monitoring
+## Testing the PostHook Example
 
 ### Overview
 
-This hook installs node_exporter for Prometheus monitoring **after migration** completes.
+The example posthook (**posthook-restore-network**) runs after migration and only loads MTV metadata and logs "Post hook ran successfully." It does not touch networking or SSH to the VM.
 
 ### Test Setup
 
 #### 1. Create the Hook CR
 
 ```bash
-oc apply -f ansible/posthook-monitoring/hook-cr.yaml
+oc apply -f ansible/posthook-restore-network/hook-cr.yaml
 oc get hooks -n konveyor-forklift
 ```
 
 #### 2. Add to Migration Plan
 
-Add the hook with `step: PostHook` instead of PreHook:
+Add the hook with `step: PostHook`:
 
 ```yaml
 vms:
   - id: vm-123
     hooks:
       - hook:
-          name: install-monitoring
+          name: restore-network
           namespace: konveyor-forklift
         step: PostHook
 ```
 
 ### Running the Test
 
-Follow similar steps as PreHook, but the hook runs **after** the VM is migrated and running on OpenShift.
-
-#### Verify Monitoring Installation
-
-```bash
-# SSH to the migrated VM
-ssh root@<new-vm-ip>
-
-# Check node_exporter is installed and running
-systemctl status node_exporter
-
-# Check it's exposing metrics
-curl http://localhost:9100/metrics
-
-# Check firewall rule was added
-firewall-cmd --list-ports | grep 9100
-```
+Run a migration that uses this plan. The posthook runs after the VM is migrated.
 
 ### Test Success Criteria
 
-✅ **PostHook pod completes successfully**  
-✅ **node_exporter service running**  
-✅ **Metrics endpoint accessible** (port 9100)  
-✅ **Firewall configured correctly**
+✅ **PostHook job completes successfully**  
+✅ **Job logs show**: "Post hook ran successfully."
 
 ---
 

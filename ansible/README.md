@@ -2,10 +2,31 @@
 
 This directory contains simple, working examples of Ansible playbooks for Migration Toolkit for Virtualization (MTV) hooks.
 
+## Goals
+
+1. **DHCP preserved after migration**  
+   After migration, the migrated VM should have interface names identical to the source VM, interfaces up, and an IP from DHCP on the **destination** (pod) network. Source and destination networks are separate—"preserved" means the VM gets DHCP on the new network, not the same IP as on the source.
+
+2. **Provide an example PreHook and an example PostHook**  
+   You need at least one example of each hook type. They do not have to be related; each example just needs to run correctly at its step.
+
+## Expected workflow (DHCP / interface preservation)
+
+- **Problem:** After migration, interface is down and no IP.
+- **Add a PreHook** that injects udev rules on the source VM (so interface names are bound to MACs).
+- **Migrate the VM.**
+- **Log in to the migrated VM** and run `ip a`.
+- **Success criteria:**
+  - Interface names are identical to the source VM.
+  - Interfaces are up.
+  - The VM gets an IP address from DHCP on the pod network.
+
+The **prehook-preserve-interface-names** example does the udev injection on the source; the migrated disk carries those rules, so the migrated VM keeps the same interface names and can get DHCP on the destination network.
+
 ## What are MTV Hooks?
 
 MTV hooks let you run Ansible playbooks at specific points during VM migration:
-- **PreHook**: Runs before migration starts (e.g., prepare the VM)
+- **PreHook**: Runs before migration starts (e.g., prepare the source VM)
 - **PostHook**: Runs after migration completes (e.g., restore network, install monitoring)
 
 **Important:** Hooks run inside a bare Ansible (hook-runner) container that does *not* have tools like `firewalld`, `nmcli`, `dbus`, or `getent`. Playbooks must be **container-safe** on localhost (use `lookup('env', 'HOME')` instead of `getent`, avoid firewall/NM modules on localhost) and perform all VM-specific work **via SSH** so that commands run on the VM where those tools may exist.
@@ -24,17 +45,16 @@ kubectl create secret generic vm-ssh-credentials \
 
 ### 2. Choose an example
 
-- **prehook-preserve-interface-names/**: Capture interface/MAC/NM/DHCP state and create udev rules on the source VM (SSH-based)
-- **posthook-restore-network/**: Restore udev and NetworkManager state on the target VM from pre-hook state file (SSH-based)
-- **posthook-monitoring/**: Install node_exporter monitoring on the target VM (SSH-based; firewall steps optional)
+- **PreHook example:** **prehook-preserve-interface-names/** — Injects udev rules on the source VM so interface names (e.g. eth0) are bound to MAC addresses. After migration, the VM keeps the same interface names and can get DHCP on the pod network.
+- **PostHook example:** **posthook-restore-network/** — Loads MTV metadata and logs "Post hook ran successfully." It does not touch networking; use it as a minimal posthook example.
 
 ### 3. Apply the Hook CR
 
 ```bash
-# PreHook: preserve interface names + NM/DHCP state
+# PreHook: preserve interface names
 kubectl apply -f prehook-preserve-interface-names/hook-cr.yaml
 
-# PostHook (optional): restore network state after migration
+# PostHook example: logs success only
 kubectl apply -f posthook-restore-network/hook-cr.yaml
 ```
 
@@ -63,17 +83,17 @@ See [QUICKSTART-TEST-HOOKS.md](QUICKSTART-TEST-HOOKS.md) for a full test walkthr
 
 1. MTV creates a Job in the cluster when the hook is triggered
 2. The job runs the hook-runner (Ansible) container with your playbook
-3. The playbook runs a small localhost play (load plan/workload, fetch SSH key from K8s), then adds the VM to inventory and runs the rest on the VM via SSH
-4. All VM-specific commands (udev, nmcli, firewall, etc.) execute on the VM over SSH, not in the container
+3. Prehook: playbook loads plan/workload, fetches SSH key, then runs tasks on the source VM via SSH (e.g. udev rules)
+4. Posthook example: playbook loads plan/workload and logs "Post hook ran successfully" (no SSH, no networking)
 5. Migration continues after hook completes
 
-For network preservation: use the **prehook-preserve-interface-names** so the source VM gets udev rules and a state file (`/root/.mtv-network-state.json`) with interface, MAC, NM UUID, and DHCP IP. After migration, use the **posthook-restore-network** so the target VM re-applies udev and NM from that state file (which migrated with the VM).
+For **DHCP preservation**: use the **prehook-preserve-interface-names** so the source VM gets udev rules. The migrated disk carries those rules; on the destination, interface names stay the same and the VM can get an IP from DHCP on the pod network. The **posthook-restore-network** is a minimal posthook example that only logs success.
 
 ## Customizing for Your Environment
 
-### Update VM connection details
+### Update VM connection details (PreHook only)
 
-Each playbook connects to the VM using information from MTV. The VM's IP address is available in the `workload.vm.ipaddress` variable.
+The prehook connects to the source VM using information from MTV. The VM's IP address is available in the `workload.vm.ipaddress` variable. The example posthook does not connect to any VM.
 
 ### Modify SSH credentials
 
